@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-A cross-platform profile manager.
+A cross-platform Profile Manager Tool with recursive backup/restore and
+explicit backup locations defined in the YAML manifest.
 
 Usage examples:
   python profile_manager.py backup
-    -> Back up (i.e. save) the current active profile (copies each file from its target location
-       to an internal backup folder).
+    -> Back up (i.e. save) the current active profile. This copies each file or directory
+       from its target location to the specified backup location (if defined in the manifest)
+       or to the default internal backup folder.
 
   python profile_manager.py restore
-    -> Restore (i.e. load) the current active profile (copies each file from the backup folder to the target).
+    -> Restore (i.e. load) the current active profile by copying backup data into the target locations.
 
   python profile_manager.py switch --profile work
     -> Save the current profile, then switch to the “work” profile (restoring its files).
@@ -29,9 +31,8 @@ import yaml
 import shutil
 
 # --- Cross–platform support for storing tool data ---
-# On Windows, use the APPDATA directory; on Unix–like systems, use the home directory.
 if sys.platform.startswith("win"):
-    # On Windows, default to the APPDATA folder (or fallback to home if APPDATA is not set)
+    # On Windows, use the APPDATA directory (or fallback to a subfolder in home)
     APPDATA = os.getenv("APPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Roaming")
     MYTOOL_DIR = os.path.join(APPDATA, "mytool")
 else:
@@ -39,6 +40,7 @@ else:
     MYTOOL_DIR = os.path.join(HOME, ".mytool")
 
 CURRENT_PROFILE_FILE = os.path.join(MYTOOL_DIR, "current_profile.txt")
+# Default internal location if no backup_location is specified in the manifest.
 PROFILES_DIR = os.path.join(MYTOOL_DIR, "profiles")
 
 
@@ -76,77 +78,118 @@ def set_active_profile(profile):
         f.write(profile)
 
 
-def backup_profile(manifest, profile):
-    """Backup (save) the current live files for the given profile.
-    
-    For each file in the profile, this function copies the file from its target location
-    into the profile's backup directory (under the tool's data folder).
+def get_backup_dir_for_profile(profile_data, profile_name):
     """
+    Return the backup directory for the profile.
+    If the profile defines a 'backup_location' in the manifest, that path (expanded) is used.
+    Otherwise, use the default internal location (MYTOOL_DIR/profiles/<profile>).
+    """
+    if 'backup_location' in profile_data:
+        backup_dir = os.path.expanduser(profile_data['backup_location'])
+    else:
+        backup_dir = os.path.join(PROFILES_DIR, profile_name)
+    os.makedirs(backup_dir, exist_ok=True)
+    return backup_dir
+
+
+def backup_target(target, backup_dir):
+    """
+    Back up the given target (a file or directory) into backup_dir.
+
+    - If target is a file, it is copied to backup_dir using its basename.
+    - If target is a directory, its contents are recursively copied to a subdirectory
+      in backup_dir with the same basename as the target.
+    """
+    target = os.path.expanduser(target)
+    if os.path.isfile(target):
+        filename = os.path.basename(target)
+        backup_path = os.path.join(backup_dir, filename)
+        try:
+            shutil.copy2(target, backup_path)
+            print(f"  Copied file {target} -> {backup_path}")
+        except Exception as e:
+            print(f"  Error copying file {target}: {e}")
+    elif os.path.isdir(target):
+        # Create a subdirectory in backup_dir with the same basename as target.
+        dest_root = os.path.join(backup_dir, os.path.basename(target))
+        for root, _, files in os.walk(target):
+            for file in files:
+                file_path = os.path.join(root, file)
+                rel_path = os.path.relpath(file_path, target)
+                dest_path = os.path.join(dest_root, rel_path)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                try:
+                    shutil.copy2(file_path, dest_path)
+                    print(f"  Copied file {file_path} -> {dest_path}")
+                except Exception as e:
+                    print(f"  Error copying file {file_path}: {e}")
+    else:
+        print(f"  WARNING: Target {target} does not exist; skipping.")
+
+
+def restore_target(target, backup_dir):
+    """
+    Restore the given target from its backup located in backup_dir.
+
+    - If the backup was a file, it is copied to target.
+    - If the backup was a directory, its contents are recursively copied back to target.
+    """
+    target = os.path.expanduser(target)
+    backup_source = os.path.join(backup_dir, os.path.basename(target))
+    if not os.path.exists(backup_source):
+        print(f"  WARNING: Backup source {backup_source} does not exist; cannot restore {target}.")
+        return
+
+    if os.path.isfile(backup_source):
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        try:
+            shutil.copy2(backup_source, target)
+            print(f"  Restored file {backup_source} -> {target}")
+        except Exception as e:
+            print(f"  Error restoring file {target}: {e}")
+    elif os.path.isdir(backup_source):
+        try:
+            os.makedirs(target, exist_ok=True)
+            shutil.copytree(backup_source, target, dirs_exist_ok=True)
+            print(f"  Restored directory {backup_source} -> {target}")
+        except Exception as e:
+            print(f"  Error restoring directory {target}: {e}")
+
+
+def backup_profile(manifest, profile):
+    """Back up the current live files (and directories) for the given profile."""
     print(f"Backing up profile: {profile}")
     profile_data = manifest.get("profiles", {}).get(profile, {})
-    files = profile_data.get("files", [])
-    profile_backup_dir = os.path.join(PROFILES_DIR, profile)
-    os.makedirs(profile_backup_dir, exist_ok=True)
+    entries = profile_data.get("files", [])
+    backup_dir = get_backup_dir_for_profile(profile_data, profile)
 
-    for entry in files:
-        target = os.path.expanduser(entry["target"])
-        # For simplicity, we use the basename of the target file for storage.
-        filename = os.path.basename(target)
-        backup_path = os.path.join(profile_backup_dir, filename)
-        if os.path.exists(target):
-            try:
-                shutil.copy2(target, backup_path)
-                print(f"  Copied {target} -> {backup_path}")
-            except Exception as e:
-                print(f"  Error copying {target}: {e}")
-        else:
-            print(f"  WARNING: Target file {target} does not exist; skipping.")
+    for entry in entries:
+        target = entry["target"]
+        backup_target(target, backup_dir)
 
 
 def restore_profile(manifest, profile):
-    """Restore (load) the backup for the given profile.
-    
-    For each file in the profile, this function copies the backup copy from the profile's backup
-    directory to its target location.
-    """
+    """Restore the backup for the given profile to the live target locations."""
     print(f"Restoring profile: {profile}")
     profile_data = manifest.get("profiles", {}).get(profile, {})
-    files = profile_data.get("files", [])
-    profile_backup_dir = os.path.join(PROFILES_DIR, profile)
+    entries = profile_data.get("files", [])
+    backup_dir = get_backup_dir_for_profile(profile_data, profile)
 
-    for entry in files:
-        target = os.path.expanduser(entry["target"])
-        filename = os.path.basename(target)
-        backup_path = os.path.join(profile_backup_dir, filename)
-        if os.path.exists(backup_path):
-            # Make sure the target directory exists.
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            try:
-                shutil.copy2(backup_path, target)
-                print(f"  Restored {backup_path} -> {target}")
-            except Exception as e:
-                print(f"  Error restoring {target}: {e}")
-        else:
-            print(f"  WARNING: Backup file {backup_path} does not exist; cannot restore {target}.")
+    for entry in entries:
+        target = entry["target"]
+        restore_target(target, backup_dir)
 
 
 def switch_profile(manifest, new_profile):
-    """Switch from the current profile to a new profile.
-    
-    This backs up the current profile and then restores the new profile.
-    """
+    """Switch from the current profile to a new profile."""
     current_profile = get_active_profile(manifest)
     if current_profile == new_profile:
         print(f"Already using profile '{new_profile}'.")
         return
 
     print(f"Switching from profile '{current_profile}' to profile '{new_profile}'.")
-
-    # Backup current profile.
     backup_profile(manifest, current_profile)
-    # Set the new active profile.
     set_active_profile(new_profile)
-    # Restore the new profile.
     restore_profile(manifest, new_profile)
     print(f"Switched to profile '{new_profile}'.")
 
@@ -160,7 +203,7 @@ def list_profiles(manifest):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Cross–platform Profile Manager Tool")
+    parser = argparse.ArgumentParser(description="Cross–platform Profile Manager Tool with Explicit Backup Locations")
     parser.add_argument(
         "command",
         choices=["backup", "restore", "switch", "list", "current"],
