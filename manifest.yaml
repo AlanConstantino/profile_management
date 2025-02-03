@@ -1,0 +1,10 @@
+profiles:
+  default:
+    # Specify an explicit backup location for the "default" profile.
+    backup_location: "/Volumes/Sandisk_2TB/backup_profile_management/default"
+    files:
+      - target: "/Users/alanconstantino/Code/profile_management/dummy_data"
+  work:
+    backup_location: "/Volumes/Sandisk_2TB/backup_profile_management/work"
+    files:
+      - target: "~/Documents"
